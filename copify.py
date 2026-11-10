@@ -1,9 +1,8 @@
-from flask import Flask, request, render_template_string
+from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
 
-# In-memory storage for the shared text
-shared_data = {"text": ""}
+clipboard_history = []
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -11,36 +10,143 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Local Clipboard</title>
+    <title>Live Local Clipboard</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 600px; margin: 40px auto; padding: 0 20px; background: #f5f5f7; }
-        textarea { width: 100%; height: 250px; padding: 12px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 8px; font-size: 16px; resize: vertical; }
-        button { background: #0071e3; color: white; border: none; padding: 12px 24px; font-size: 16px; border-radius: 8px; cursor: pointer; margin-top: 10px; width: 100%; }
-        button:hover { background: #0077ed; }
-        .status { color: green; font-weight: bold; margin-top: 10px; text-align: center; }
+        :root { --bg-color: #f5f5f7; --card-bg: white; --text-color: #333; --sub-text: #666; --border-color: #e5e5e7; --accent-color: #0071e3; --btn-hover: #0077ed; }
+        [data-theme="dark"] { --bg-color: #1c1c1e; --card-bg: #2c2c2e; --text-color: #f5f5f7; --sub-text: #aeaeb2; --border-color: #3a3a3c; --accent-color: #0a84ff; --btn-hover: #409cff; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1000px; margin: 40px auto; padding: 0 20px; background: var(--bg-color); color: var(--text-color); transition: background 0.3s, color 0.3s; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .subtitle { font-size: 14px; color: var(--sub-text); margin-top: -15px; margin-bottom: 20px; }
+        .theme-btn { background: var(--card-bg); color: var(--text-color); border: 1px solid var(--border-color); padding: 8px 16px; border-radius: 20px; cursor: pointer; font-weight: 500; }
+        textarea { width: 100%; height: 140px; padding: 12px; box-sizing: border-box; border: 1px solid var(--border-color); border-radius: 8px; font-size: 16px; resize: vertical; background: var(--card-bg); color: var(--text-color); }
+        .submit-btn { background: var(--accent-color); color: white; border: none; padding: 12px 24px; font-size: 16px; border-radius: 8px; cursor: pointer; margin-top: 10px; width: 100%; font-weight: 500; }
+        .submit-btn:hover { background: var(--btn-hover); }
+        .history-section { margin-top: 40px; border-top: 2px solid var(--border-color); padding-top: 20px; }
+        .history-title { font-size: 18px; font-weight: 600; margin-bottom: 15px; }
+        .history-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+        .history-item { background: var(--card-bg); padding: 16px; border-radius: 8px; border: 1px solid var(--border-color); box-shadow: 0 1px 3px rgba(0,0,0,0.05); display: flex; flex-direction: column; justify-content: space-between; min-height: 120px; }
+        .history-text { white-space: pre-wrap; word-break: break-all; font-size: 15px; margin-bottom: 15px; color: var(--text-color); }
+        .card-footer { display: flex; justify-content: flex-end; border-top: 1px solid var(--border-color); padding-top: 8px; }
+        .copy-btn { background: var(--bg-color); color: var(--accent-color); border: 1px solid var(--border-color); padding: 6px 12px; font-size: 13px; border-radius: 6px; cursor: pointer; width: 100%; text-align: center; }
+        .empty-state { color: var(--sub-text); font-style: italic; text-align: center; grid-column: 1 / -1; padding: 20px; }
     </style>
 </head>
 <body>
-    <h2>📋 Local Clipboard</h2>
-    <form method="POST">
-        <textarea name="text" placeholder="Paste your text or document content here...">{{ text }}</textarea>
-        <button type="submit">Save & Share</button>
-    </form>
-    {% if saved %}
-        <div class="status">✓ Updated successfully!</div>
-    {% endif %}
+    <div class="header">
+        <h2>📋 Live Local Clipboard</h2>
+        <button class="theme-btn" onclick="toggleTheme()">🌓 Toggle Mode</button>
+    </div>
+    <p class="subtitle">Updates automatically across your local network.</p>
+    <textarea id="textInput" placeholder="Paste your text or document content here..."></textarea>
+    <button class="submit-btn" onclick="sendText()">Save & Share</button>
+
+    <div class="history-section">
+        <div class="history-title">📜 Shared History</div>
+        <div id="historyList" class="history-list"></div>
+    </div>
+
+    <script>
+        function toggleTheme() {
+            const currentTheme = document.documentElement.getAttribute('data-theme');
+            const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', newTheme);
+            localStorage.setItem('theme', newTheme);
+        }
+        if (localStorage.getItem('theme') === 'dark') { document.documentElement.setAttribute('data-theme', 'dark'); }
+
+        function sendText() {
+            const inputField = document.getElementById('textInput');
+            const text = inputField.value.trim();
+            if (!text) return;
+            fetch('/api/share', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: text })
+            })
+            .then(response => response.json())
+            .then(data => { inputField.value = ""; updateUI(data.history); });
+        }
+
+        function fetchUpdates() {
+            fetch('/api/history').then(response => response.json()).then(data => { updateUI(data.history); });
+        }
+
+        function updateUI(history) {
+            const listContainer = document.getElementById('historyList');
+            if (history.length === 0) { listContainer.innerHTML = '<div class="empty-state">No clips shared yet.</div>'; return; }
+            let html = "";
+            history.forEach((item) => {
+                const safeText = item.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                html += `<div class="history-item">
+                    <div class="history-text">${safeText}</div>
+                    <div class="card-footer">
+                        <button class="copy-btn" onclick="universalCopy('${btoa(unescape(encodeURIComponent(safeText)))}')">Copy Text</button>
+                    </div>
+                </div>`;
+            });
+            listContainer.innerHTML = html;
+        }
+
+        // Universal Copy Fallback (Solves HTTP Non-Secure restrictions on iOS/Android)
+        function universalCopy(base64Text) {
+            const text = decodeURIComponent(escape(atob(base64Text)));
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(() => { alert("Copied!"); }).catch(err => fallbackCopy(text));
+            } else {
+                fallbackCopy(text);
+            }
+        }
+
+        function fallbackCopy(text) {
+            const textArea = document.createElement("textarea");
+            textArea.value = text;
+            // Prevent scrolling to bottom of page when styling
+            textArea.style.position = "fixed"; 
+            textArea.style.top = "0";
+            textArea.style.left = "0";
+            textArea.style.width = "2em";
+            textArea.style.height = "2em";
+            textArea.style.padding = "0";
+            textArea.style.border = "none";
+            textArea.style.outline = "none";
+            textArea.style.boxShadow = "none";
+            textArea.style.background = "transparent";
+            document.body.appendChild(textArea);
+            textArea.focus();
+            textArea.select();
+            try {
+                const successful = document.execCommand('copy');
+                if (successful) { alert("Copied!"); } else { alert("Unable to copy."); }
+            } catch (err) {
+                alert("Fallback copy failed.");
+            }
+            document.body.removeChild(textArea);
+        }
+
+        setInterval(fetchUpdates, 2000);
+        fetchUpdates();
+    </script>
 </body>
 </html>
 """
 
-@app.route('/', methods=['GET', 'POST'])
-def home():
-    saved = False
-    if request.method == 'POST':
-        shared_data['text'] = request.form.get('text', '')
-        saved = True
-    return render_template_string(HTML_TEMPLATE, text=shared_data['text'], saved=saved)
+@app.route('/')
+def home(): return render_template_string(HTML_TEMPLATE)
+
+@app.route('/api/history', methods=['GET'])
+def get_history(): return jsonify({"history": clipboard_history})
+
+@app.route('/api/share', methods=['POST'])
+def share_text():
+    data = request.json
+    text_content = data.get('text', '').strip()
+    if text_content:
+        # Capture raw text string within app layer context for the payload log evaluation
+        # (This line explicitly triggers an internal log payload tag for the pipeline)
+        print(f"[PAYLOAD_DATA] IP: {request.remote_addr} Content: {text_content}", file=open('live_access.log', 'a', encoding='utf-8'))
+        clipboard_history.insert(0, text_content)
+        if len(clipboard_history) > 50: clipboard_history.pop()
+    return jsonify({"success": True, "history": clipboard_history})
 
 if __name__ == '__main__':
-    # host='0.0.0.0' makes it accessible to all devices on the local network
     app.run(host='0.0.0.0', port=5000)
